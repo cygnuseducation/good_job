@@ -11,12 +11,18 @@ module GoodJob
     #   @return [Array<GoodJob::Capsule>, nil]
     cattr_reader :instances, default: Concurrent::Array.new, instance_reader: false
 
+    attr_reader :process_tracker
+
     # @param configuration [GoodJob::Configuration] Configuration to use for this capsule.
     def initialize(configuration: GoodJob.configuration)
       @configuration = configuration
       @startable = true
       @running = false
       @mutex = Mutex.new
+
+      # TODO: allow the shared executor to remain until the very, very end, then shutdown. And allow restart.
+      @shared_executor = GoodJob::SharedExecutor.new
+      @process_tracker = GoodJob::ProcessTracker.new
 
       self.class.instances << self
     end
@@ -29,8 +35,7 @@ module GoodJob
       @mutex.synchronize do
         return unless startable?(force: force)
 
-        @shared_executor = GoodJob::SharedExecutor.new
-        @notifier = GoodJob::Notifier.new(enable_listening: @configuration.enable_listen_notify, executor: @shared_executor.executor)
+        @notifier = GoodJob::Notifier.new(enable_listening: @configuration.enable_listen_notify, capsule: self, executor: @shared_executor.executor)
         @poller = GoodJob::Poller.new(poll_interval: @configuration.poll_interval)
         @scheduler = GoodJob::Scheduler.from_configuration(@configuration, warm_cache_on_initialize: true)
         @notifier.recipients << [@scheduler, :create_thread]
@@ -51,10 +56,12 @@ module GoodJob
     #   * +nil+ will trigger a shutdown but not wait for it to complete.
     # @return [void]
     def shutdown(timeout: :default)
-      timeout = @configuration.shutdown_timeout if timeout == :default
-      GoodJob._shutdown_all([@shared_executor, @notifier, @poller, @scheduler, @cron_manager].compact, timeout: timeout)
-      @startable = false
-      @running = false
+      @mutex.synchronize do
+        timeout = @configuration.shutdown_timeout if timeout == :default
+        GoodJob._shutdown_all([@notifier, @poller, @scheduler, @cron_manager].compact, timeout: timeout)
+        @startable = false
+        @running = false
+      end
     end
 
     # Shutdown and then start the capsule again.
@@ -74,7 +81,7 @@ module GoodJob
 
     # @return [Boolean] Whether the capsule has been shutdown.
     def shutdown?
-      [@shared_executor, @notifier, @poller, @scheduler, @cron_manager].compact.all?(&:shutdown?)
+      [@notifier, @poller, @scheduler, @cron_manager].compact.all?(&:shutdown?)
     end
 
     # Creates an execution thread(s) with the given attributes.

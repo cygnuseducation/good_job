@@ -13,11 +13,15 @@ module GoodJob # :nodoc:
     # Interval until the process record is treated as expired
     EXPIRED_INTERVAL = 5.minutes
 
-    self.table_name = 'good_job_processes'
+    LOCK_TYPES = [
+      LOCK_TYPE_ADVISORY = 'advisory',
+    ].freeze
 
-    cattr_reader :mutex, default: Mutex.new
-    cattr_accessor :_current_id, default: nil
-    cattr_accessor :_pid, default: nil
+    LOCK_TYPE_ENUMS = {
+      LOCK_TYPE_ADVISORY => 1,
+    }.freeze
+
+    self.table_name = 'good_job_processes'
 
     # Processes that are active and locked.
     # @!method active
@@ -31,29 +35,31 @@ module GoodJob # :nodoc:
     # @return [ActiveRecord::Relation]
     scope :inactive, -> { advisory_unlocked }
 
-    # UUID that is unique to the current process and changes when forked.
-    # @return [String]
-    def self.current_id
-      mutex.synchronize { ns_current_id }
-    end
-
-    def self.ns_current_id
-      if _current_id.nil? || _pid != ::Process.pid
-        self._current_id = SecureRandom.uuid
-        self._pid = ::Process.pid
+    # Deletes all inactive process records.
+    def self.cleanup
+      inactive.find_each do |process|
+        GoodJob::Job.where(locked_by_id: process.id).update_all(locked_by_id: nil, locked_at: nil) if GoodJob::Job.process_lock_migrated? # rubocop:disable Rails/SkipsModelValidations
+        process.delete
       end
-      _current_id
     end
 
-    # Hash representing metadata about the current process.
-    # @return [Hash]
-    def self.current_state
-      mutex.synchronize { ns_current_state }
+    # @return [Boolean]
+    def self.lock_type_migrated?
+      columns_hash["lock_type"].present?
     end
 
-    def self.ns_current_state
+    def self.create_record(id:, with_advisory_lock: false)
+      create!({
+        id: id,
+        state: generate_state,
+        create_with_advisory_lock: with_advisory_lock,
+      }.tap do |args|
+        args[:lock_type] = LOCK_TYPE_ADVISORY if with_advisory_lock && lock_type_migrated?
+      end)
+    end
+
+    def self.generate_state
       {
-        id: ns_current_id,
         hostname: Socket.gethostname,
         pid: ::Process.pid,
         proctitle: $PROGRAM_NAME,
@@ -70,51 +76,14 @@ module GoodJob # :nodoc:
       }
     end
 
-    # Deletes all inactive process records.
-    def self.cleanup
-      inactive.delete_all
-    end
-
-    # Registers the current process in the database
-    # @return [GoodJob::Process]
-    def self.register
-      mutex.synchronize do
-        process_state = ns_current_state
-        create(id: process_state[:id], state: process_state, create_with_advisory_lock: true)
-      rescue ActiveRecord::RecordNotUnique
-        find(ns_current_state[:id])
-      end
-    end
-
     def refresh
-      mutex.synchronize do
-        reload
-        update(state: self.class.ns_current_state, updated_at: Time.current)
-      rescue ActiveRecord::RecordNotFound
-        false
-      end
-    end
-
-    # Unregisters the instance.
-    def deregister
-      return unless owns_advisory_lock?
-
-      mutex.synchronize do
-        destroy!
-        advisory_unlock
-      end
-    end
-
-    def state
-      super || {}
-    end
-
-    def basename
-      File.basename(state.fetch("proctitle", ""))
-    end
-
-    def schedulers
-      state.fetch("schedulers", [])
+      self.state = self.class.generate_state
+      reload.update(state: state, updated_at: Time.current)
+    rescue ActiveRecord::RecordNotFound
+      @new_record = true
+      self.created_at = self.updated_at = nil
+      state_will_change!
+      save
     end
 
     def refresh_if_stale(cleanup: false)
@@ -125,12 +94,40 @@ module GoodJob # :nodoc:
       result
     end
 
+    def state
+      super || {}
+    end
+
     def stale?
       updated_at < STALE_INTERVAL.ago
     end
 
     def expired?
       updated_at < EXPIRED_INTERVAL.ago
+    end
+
+    def basename
+      File.basename(state.fetch("proctitle", ""))
+    end
+
+    def schedulers
+      state.fetch("schedulers", [])
+    end
+
+    def lock_type
+      return unless self.class.columns_hash['lock_type']
+
+      enum = super
+      LOCK_TYPE_ENUMS.key(enum) if enum
+    end
+
+    def lock_type=(value)
+      return unless self.class.columns_hash['lock_type']
+
+      enum = LOCK_TYPE_ENUMS[value]
+      raise(ArgumentError, "Invalid error_event: #{value}") if value && !enum
+
+      super(enum)
     end
   end
 end

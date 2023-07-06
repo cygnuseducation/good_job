@@ -31,6 +31,7 @@ require "good_job/notifier"
 require "good_job/poller"
 require "good_job/http_server"
 require "good_job/probe_server"
+require "good_job/process_tracker"
 require "good_job/scheduler"
 require "good_job/shared_executor"
 require "good_job/systemd_service"
@@ -258,7 +259,7 @@ module GoodJob
   def self.migrated?
     # Always update with the most recent migration check
     GoodJob::Execution.reset_column_information
-    GoodJob::Execution.error_event_migrated?
+    GoodJob::Execution.process_lock_migrated?
   end
 
   ActiveSupport.run_load_hooks(:good_job, self)

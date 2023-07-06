@@ -2,6 +2,7 @@
 
 require 'active_support/core_ext/module/attribute_accessors_per_thread'
 require 'concurrent/atomic/atomic_boolean'
+require "concurrent/scheduled_task"
 require "good_job/notifier/process_heartbeat"
 
 module GoodJob # :nodoc:
@@ -60,8 +61,7 @@ module GoodJob # :nodoc:
 
     # @param recipients [Array<#call, Array(Object, Symbol)>]
     # @param enable_listening [true, false]
-    # @param executor [Concurrent::ExecutorService]
-    def initialize(*recipients, enable_listening: true, executor: Concurrent.global_io_executor)
+    def initialize(*recipients, enable_listening: true, capsule: GoodJob.capsule, executor: Concurrent.global_io_executor)
       @recipients = Concurrent::Array.new(recipients)
       @enable_listening = enable_listening
       @executor = executor
@@ -75,6 +75,7 @@ module GoodJob # :nodoc:
       @connection_errors_reported = Concurrent::AtomicBoolean.new(false)
       @enable_listening = enable_listening
       @task = nil
+      @capsule = capsule
 
       start
       self.class.instances << self
