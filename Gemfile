@@ -24,6 +24,7 @@ gem "sorbet", group: :development
 gem "sorbet-runtime"
 gem "spoom", require: false, group: :development
 gem "tapioca", require: false, group: :development
+gem "vernier", github: "jhawthorn/vernier"
 
 platforms :ruby do
   gem "activerecord-explain-analyze", require: false
@@ -47,3 +48,4 @@ platforms :ruby do
     gem "rubocop-rspec"
   end
 end
+
